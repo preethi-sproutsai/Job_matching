@@ -28,3 +28,4 @@ tqdm==4.67.1
 transformers==4.53.2
 typing_extensions==4.14.1
 urllib3==2.5.0
+pydantic==2.9.2
