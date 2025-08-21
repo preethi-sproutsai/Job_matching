@@ -58,7 +58,7 @@ def filter_jobs(candidate_request, threshold=0.75):
 
     threshold_jobs = []
     for res in results:
-        similarity = res.score  # cosine distance → similarity
+        similarity = res.score  # cosine similarity
         if similarity >= threshold:
             threshold_jobs.append(res)
 
