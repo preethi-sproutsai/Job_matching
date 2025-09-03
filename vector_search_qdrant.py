@@ -11,7 +11,7 @@ from qdrant_client.http.models import MatchExcept, FieldCondition, GeoBoundingBo
 print(inspect.getsource(MatchExcept))
 # Initialize Qdrant client and embedding model
 QDRANT_HOST = "localhost"
-QDRANT_PORT = 6335
+QDRANT_PORT = 6333
 QDRANT_COLLECTION_NAME = "jobs"
 qdrant = qdrant_client.QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 model = SentenceTransformer("all-MiniLM-L6-v2")
