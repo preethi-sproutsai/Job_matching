@@ -5,6 +5,7 @@ from schema import SproutsResponse, SproutsRequest  # Your pydantic schemas
 from sentence_transformers import SentenceTransformer
 import requests
 
+from qdrant_client.http.models import GeoPoint
 import uuid
 from bson import ObjectId  
 # Initialize Qdrant client and embedding model
@@ -134,6 +135,106 @@ def convert_salary_to_per_month(salary: dict, job_type_list: list) -> dict:
     converted_salary["currency"] = "$"  # After conversion to USD
 
     return converted_salary
+
+import requests
+from rapidfuzz import fuzz
+
+def get_possible_locations_from_api(location_list, threshold=80):
+    """
+    Given a list of location strings, call the autocomplete API for each,
+    gather all locations (cities, regions, countries, other) whose description
+    fuzzy-match the input with score >= threshold.
+    Returns a list of unique possible locations.
+    """
+    possible_locations_set = set()
+    url = "http://staging.quesgen.sproutsai.com/get-loc-autocomplete"
+    headers = {"Content-Type": "application/json"}
+
+    for loc in location_list:
+        n = len(loc)
+        try:
+            payload = {"query": loc}
+            response = requests.post(url, json=payload, headers=headers, timeout=5)
+            response.raise_for_status()
+            data = response.json().get("output", {})
+
+            # Collect from all categories
+            for category in ["countries", "regions", "cities"]:
+                items = data.get(category, [])
+                for item in items:
+                    description = item.get("description", "")
+                    if not description:
+                        continue
+                    # Take first n chars for fuzzy match
+                    candidate_prefix = description[:n]
+                    score = fuzz.ratio(loc.lower(), candidate_prefix.lower())
+                    if score >= threshold:
+                        possible_locations_set.add(description)
+
+        except Exception as e:
+            print(f"Error fetching location for '{loc}': {e}")
+
+    return list(possible_locations_set)
+
+GEO_INFO_URL = "http://staging.quesgen.sproutsai.com/get-geo-info"
+
+def fetch_bounding_boxes(possible_locations):
+    """
+    For each location, call get-geo-info API and return a list of bounding boxes.
+    Each bbox is [south, north, west, east].
+    """
+    bbox_list = []
+
+    headers = {"Content-Type": "application/json"}
+
+    for loc in possible_locations:
+        payload = {"location": loc, "try_google": False}
+        try:
+            response = requests.post(GEO_INFO_URL, json=payload, headers=headers, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+
+            display_name = data.get("display_name", "")
+            bbox = data.get("boundingbox", [])
+
+            # Special case for United States
+            if display_name=="United States":
+                bbox = [25.84, 49.38, -124.67, -66.95]
+
+            if bbox:
+                bbox_list.append(bbox)
+
+        except Exception as e:
+            print(f"Error fetching geo-info for '{loc}': {e}")
+            continue
+
+    return bbox_list
+
+def fetch_lat_lon(possible_locations):
+    """
+    For each location, call get-geo-info API and return a dict mapping
+    location -> {"lat": ..., "lon": ...}.
+    """
+    lat_lon_dict = {}
+
+    headers = {"Content-Type": "application/json"}
+
+    for loc in possible_locations:
+        payload = {"location": loc, "try_google": False}
+        try:
+            response = requests.post(GEO_INFO_URL, json=payload, headers=headers, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            lat = data.get("lat")
+            lon = data.get("lon")
+            if lat is not None and lon is not None:
+                lat_lon_dict[loc] = {"lat": lat, "lon": lon}
+        except Exception as e:
+            print(f"Error fetching geo-info for '{loc}': {e}")
+            continue
+
+    return lat_lon_dict
+
 def process_sprouts_response(data: dict):
     sprouts_response = SproutsResponse(**data)
 
@@ -169,6 +270,18 @@ def process_sprouts_response(data: dict):
         if isinstance(job.location, list):
             active_locations = [loc.name for loc in job.location if (loc.status or "").lower() == "true"]
             payload["location"] = active_locations
+            possible_locations_set = get_possible_locations_from_api(active_locations)
+            #payload["possible_locations"] = list(possible_locations_set)
+            lat_longitudes = fetch_lat_lon(possible_locations_set)
+            #payload["lat_longitudes"] = lat_longitudes
+            geo_points_payload = []
+            for loc, coords in lat_longitudes.items():
+                geo_points_payload.append({
+                    "loc": loc,
+                    "point": GeoPoint(lat=float(coords["lat"]), lon=float(coords["lon"]))
+                })
+            #geo_points = [GeoPoint(lat=pt["lat"], lon=pt["lon"]) for pt in lat_longitudes]
+            payload["geo_points"] = geo_points_payload
 
         # Parse notice_period and add processed field
         if job.notice_period and job.notice_period.data:
@@ -251,6 +364,174 @@ if __name__ == "__main__":
                     "name": "Sunnyvale, California, USA",
                     "status": "true"
                     }
+                ],
+                "salary": {
+                    "min": "100",
+                    "max": "150",
+                    "duration": "Per day",
+                    "salvisibility": "Display",
+                    "currency": "₹"
+                },
+                "name": "Computer Vision Engineer",
+                "notice_period": {
+                    "data": "2 to 4 weeks"
+                },
+                "job_description": "Work on NLP models.",
+                "workplace": "Remote",
+                "createdAt": "2025-08-20T10:00:00Z",
+                "updatedAt": "2025-08-21T15:00:00Z"
+            },
+            {
+                "_id": "68a6f05fc15d170007b87250",
+                "status": "active",
+                 "job_type": [
+                    {
+                    "type": "full-time",
+                    "status": "false"
+                    },
+                    {
+                    "type": "regular/permanent",
+                    "status": "false"
+                    },
+                    {
+                    "type": "part-time",
+                    "status": "true"
+                    },
+                    {
+                    "type": "internship",
+                    "status": "false"
+                    },
+                    {
+                    "type": "contract/temporary",
+                    "status": "false"
+                    },
+                    {
+                    "type": "volunteer",
+                    "status": "false"
+                    },
+                    {
+                    "type": "other",
+                    "status": "false"
+                    }
+                ],
+                "location": [
+                    {
+                    "name": "Austin",
+                    "status": "true"
+                    },
+                    {
+                    "name": "Hyderabad",
+                    "status": "true"
+                    }
+                ],
+                "salary": {
+                    "min": "100",
+                    "max": "150",
+                    "duration": "Per day",
+                    "salvisibility": "Display",
+                    "currency": "₹"
+                },
+                "name": "Computer Vision Engineer",
+                "notice_period": {
+                    "data": "2 to 4 weeks"
+                },
+                "job_description": "Work on NLP models.",
+                "workplace": "Remote",
+                "createdAt": "2025-08-20T10:00:00Z",
+                "updatedAt": "2025-08-21T15:00:00Z"
+            },
+                {
+                "_id": "68a6f05fc15d170007b87251",
+                "status": "active",
+                 "job_type": [
+                    {
+                    "type": "full-time",
+                    "status": "false"
+                    },
+                    {
+                    "type": "regular/permanent",
+                    "status": "false"
+                    },
+                    {
+                    "type": "part-time",
+                    "status": "true"
+                    },
+                    {
+                    "type": "internship",
+                    "status": "false"
+                    },
+                    {
+                    "type": "contract/temporary",
+                    "status": "false"
+                    },
+                    {
+                    "type": "volunteer",
+                    "status": "false"
+                    },
+                    {
+                    "type": "other",
+                    "status": "false"
+                    }
+                ],
+                "location": [
+                    {
+                    "name": "Bombay",
+                    "status": "true"
+                    },
+                ],
+                "salary": {
+                    "min": "100",
+                    "max": "150",
+                    "duration": "Per day",
+                    "salvisibility": "Display",
+                    "currency": "₹"
+                },
+                "name": "Computer Vision Engineer",
+                "notice_period": {
+                    "data": "2 to 4 weeks"
+                },
+                "job_description": "Work on NLP models.",
+                "workplace": "Remote",
+                "createdAt": "2025-08-20T10:00:00Z",
+                "updatedAt": "2025-08-21T15:00:00Z"
+            }, {
+                "_id": "68a6f05fc15d170007b87252",
+                "status": "active",
+                 "job_type": [
+                    {
+                    "type": "full-time",
+                    "status": "false"
+                    },
+                    {
+                    "type": "regular/permanent",
+                    "status": "false"
+                    },
+                    {
+                    "type": "part-time",
+                    "status": "true"
+                    },
+                    {
+                    "type": "internship",
+                    "status": "false"
+                    },
+                    {
+                    "type": "contract/temporary",
+                    "status": "false"
+                    },
+                    {
+                    "type": "volunteer",
+                    "status": "false"
+                    },
+                    {
+                    "type": "other",
+                    "status": "false"
+                    }
+                ],
+                "location": [
+                    {
+                    "name": "nyc",
+                    "status": "true"
+                    },
                 ],
                 "salary": {
                     "min": "100",
