@@ -1,26 +1,24 @@
 import time
 import requests
+import math
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 from schema import CandidateRequest, CandidateJobResponse, CandidateResponse
-from vector_search_qdrant import filter_jobs
+from t1 import filter_jobs
 app = FastAPI()
-PAGE_SIZE = 10
 @app.post("/search_jobs", response_model=CandidateResponse)
-def search_jobs(candidate_request: CandidateRequest):
-    all_jobs = filter_jobs(candidate_request, threshold=0.75)  # Your existing function
-
-    total_results = len(all_jobs)
+async def search_jobs(candidate_request: CandidateRequest):
     page = candidate_request.page if candidate_request.page and candidate_request.page > 0 else 1
-    start = (page - 1) * PAGE_SIZE
-    end = start + PAGE_SIZE
+    page_size = candidate_request.page_size if candidate_request.page_size and candidate_request.page_size > 0 else 10
+    paginated_jobs, total_results = await filter_jobs(candidate_request, threshold=0.75)  
+    total_pages = math.ceil(total_results / page_size) if page_size > 0 else 1
 
-    jobs_page = all_jobs[start:end]
-
+    #total_results = len(paginated_jobs)
+   
     jobs_serializable = []
-    for job in jobs_page:
+    for job in paginated_jobs:
         jobs_serializable.append(
             CandidateJobResponse(
                 job_id=str(job.id),
@@ -30,10 +28,11 @@ def search_jobs(candidate_request: CandidateRequest):
                 job_type=job.payload.get("job_type")
             )
         )
-
+   
     return CandidateResponse(
         jobs=jobs_serializable,
         page=page,
-        page_size=PAGE_SIZE,
+        page_size=page_size,
+        total_pages=total_pages,
         total_results=total_results
     )
