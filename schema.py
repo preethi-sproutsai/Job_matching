@@ -68,14 +68,21 @@ class WorkPreference(BaseModel):
     createdAt: Optional[datetime] = None
     updatedAt: Optional[datetime] = None
 
-
 class CandidateRequest(BaseModel):
     work_preference: Optional[WorkPreference] = None
     resume: Optional[str] = None
-
+    page: Optional[int] = 1  # Pagination, 1-based
+    page_size: Optional[int] = 10
 class CandidateJobResponse(BaseModel):
     job_id: str
     job_title: Optional[str] = None
     location: Optional[str] = None
     workplace: Optional[str] = None
     job_type: Optional[List[JobType]] = None
+
+class CandidateResponse(BaseModel):
+    jobs: list[CandidateJobResponse]
+    page: int
+    page_size: int
+    total_pages: int
+    total_results: int
