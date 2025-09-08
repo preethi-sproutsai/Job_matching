@@ -10,11 +10,25 @@ import uuid
 from bson import ObjectId  
 # Initialize Qdrant client and embedding model
 QDRANT_HOST = "localhost"
-QDRANT_PORT = 6333
+QDRANT_PORT = 6336
 QDRANT_COLLECTION_NAME = "jobs"
 #qdrant = qdrant_client.QdrantClient(":memory:")  # For demo; replace with actual Qdrant host/url
 qdrant = qdrant_client.QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 model = SentenceTransformer("all-MiniLM-L6-v2")
+import json
+from pathlib import Path
+# add_jobs_qdrant.py
+from config import EXCHANGE_RATE_FILE
+
+def get_cached_rate() -> float:
+    if EXCHANGE_RATE_FILE.exists():
+        data = json.loads(EXCHANGE_RATE_FILE.read_text())
+        return data.get("rate", 1.0)  # fallback to 1.0 if missing
+    return 1.0  # fallback if file doesn't exist
+
+# Example usage
+rate = get_cached_rate()
+print(f"Cached INR→USD rate: {rate}")
 
 
 # Create collection if not exists (no recreation)
@@ -31,29 +45,6 @@ def objectid_to_uuid(oid_str: str) -> str:
     # Pad or trim to 16 bytes for UUID (ObjectId is 12 bytes, pad with 4 zeros)
     padded_bytes = oid_bytes + b'\x00\x00\x00\x00'
     return str(uuid.UUID(bytes=padded_bytes))
-import requests
-
-EXCHANGE_API_KEY = "fca_live_Mz2e64CuQ8CpmQueVp0SC12rPTAMOgTHhSeEurCv"
-
-def fetch_rate(from_currency: str, to_currency: str = "USD") -> float:
-    if from_currency == to_currency:
-        return 1.0
-    else:
-        url = f"https://api.freecurrencyapi.com/v1/latest?apikey={EXCHANGE_API_KEY}&base_currency={from_currency}&currencies={to_currency}"
-        try:
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            # The API returns data in the 'data' field
-            rates = data.get("data", {})
-            rate = rates.get(to_currency)
-            if rate:
-                return float(rate)
-            else:
-                print("Error: to_currency not found in response data", data)
-        except Exception as e:
-            print("Error fetching rate:", e)
-        return 1.0  # fallback
 
 def parse_notice_period_fixed(notice_data: str) -> dict:
     """
@@ -79,11 +70,6 @@ def parse_notice_period_fixed(notice_data: str) -> dict:
     return mapping.get(nd_lower, {})
 
 
-
-# Usage
-rate_inr_usd = fetch_rate("INR", "USD")
-print("INR to USD:", rate_inr_usd)
-
 def convert_salary_to_per_month(salary: dict, job_type_list: list) -> dict:
     """
     Convert salary to per month salary in same structure:
@@ -106,7 +92,7 @@ def convert_salary_to_per_month(salary: dict, job_type_list: list) -> dict:
         return salary  # fallback to original if parsing fails
 
     # conversion rates
-    rate = fetch_rate("INR", "USD") if currency =="₹" else 1
+    rate = get_cached_rate() if currency =="₹" else 1
 
     # Check job types for hourly conversion
     job_types = [jt["type"].lower() for jt in job_type_list if isinstance(jt, dict) and "type" in jt]
@@ -136,106 +122,56 @@ def convert_salary_to_per_month(salary: dict, job_type_list: list) -> dict:
 
     return converted_salary
 
-import requests
-from rapidfuzz import fuzz
-
-def get_possible_locations_from_api(location_list, threshold=80):
-    """
-    Given a list of location strings, call the autocomplete API for each,
-    gather all locations (cities, regions, countries, other) whose description
-    fuzzy-match the input with score >= threshold.
-    Returns a list of unique possible locations.
-    """
-    possible_locations_set = set()
-    url = "http://staging.quesgen.sproutsai.com/get-loc-autocomplete"
-    headers = {"Content-Type": "application/json"}
-
-    for loc in location_list:
-        n = len(loc)
-        try:
-            payload = {"query": loc}
-            response = requests.post(url, json=payload, headers=headers, timeout=5)
-            response.raise_for_status()
-            data = response.json().get("output", {})
-
-            # Collect from all categories
-            for category in ["countries", "regions", "cities"]:
-                items = data.get(category, [])
-                for item in items:
-                    description = item.get("description", "")
-                    if not description:
-                        continue
-                    # Take first n chars for fuzzy match
-                    candidate_prefix = description[:n]
-                    score = fuzz.ratio(loc.lower(), candidate_prefix.lower())
-                    if score >= threshold:
-                        possible_locations_set.add(description)
-
-        except Exception as e:
-            print(f"Error fetching location for '{loc}': {e}")
-
-    return list(possible_locations_set)
-
 GEO_INFO_URL = "http://staging.quesgen.sproutsai.com/get-geo-info"
-
-def fetch_bounding_boxes(possible_locations):
-    """
-    For each location, call get-geo-info API and return a list of bounding boxes.
-    Each bbox is [south, north, west, east].
-    """
-    bbox_list = []
-
+import aiohttp
+import asyncio
+from typing import List, Dict
+async def fetch_geo_info(session: aiohttp.ClientSession, loc: str, try_google: bool = False) -> dict:
+    payload = {"location": loc, "try_google": try_google}
     headers = {"Content-Type": "application/json"}
+    try:
+        async with session.post(GEO_INFO_URL, json=payload, headers=headers, timeout=5) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            return {"location": loc, "data": data}
+    except Exception as e:
+        print(f"Error fetching geo-info for '{loc}': {e}")
+        return {"location": loc, "data": None}
 
-    for loc in possible_locations:
-        payload = {"location": loc, "try_google": False}
-        try:
-            response = requests.post(GEO_INFO_URL, json=payload, headers=headers, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-
-            display_name = data.get("display_name", "")
-            bbox = data.get("boundingbox", [])
-
-            # Special case for United States
-            if display_name=="United States":
-                bbox = [25.84, 49.38, -124.67, -66.95]
-
-            if bbox:
-                bbox_list.append(bbox)
-
-        except Exception as e:
-            print(f"Error fetching geo-info for '{loc}': {e}")
-            continue
-
+async def fetch_bounding_boxes(possible_locations: List[str]) -> List[List[float]]:
+    bbox_list = []
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_geo_info(session, loc) for loc in possible_locations]
+        results = await asyncio.gather(*tasks)
+        for result in results:
+            data = result["data"]
+            loc = result["location"]
+            if data:
+                bbox = data.get("boundingbox", [])
+                display_name = data.get("display_name", "")
+                # Special case for United States
+                if display_name == "United States":
+                    bbox = [25.84, 49.38, -124.67, -66.95]
+                if bbox:
+                    bbox_list.append(bbox)
     return bbox_list
 
-def fetch_lat_lon(possible_locations):
-    """
-    For each location, call get-geo-info API and return a dict mapping
-    location -> {"lat": ..., "lon": ...}.
-    """
+async def fetch_lat_lon(possible_locations: List[str]) -> Dict[str, dict]:
     lat_lon_dict = {}
-
-    headers = {"Content-Type": "application/json"}
-
-    for loc in possible_locations:
-        payload = {"location": loc, "try_google": False}
-        try:
-            response = requests.post(GEO_INFO_URL, json=payload, headers=headers, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            lat = data.get("lat")
-            lon = data.get("lon")
-            if lat is not None and lon is not None:
-                lat_lon_dict[loc] = {"lat": lat, "lon": lon}
-        except Exception as e:
-            print(f"Error fetching geo-info for '{loc}': {e}")
-            continue
-
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_geo_info(session, loc) for loc in possible_locations]
+        results = await asyncio.gather(*tasks)
+        for result in results:
+            data = result["data"]
+            loc = result["location"]
+            if data:
+                lat = data.get("lat")
+                lon = data.get("lon")
+                if lat is not None and lon is not None:
+                    lat_lon_dict[loc] = {"lat": lat, "lon": lon}
     return lat_lon_dict
 
-def process_sprouts_response(data: dict):
+async def process_sprouts_response(data: dict):
     sprouts_response = SproutsResponse(**data)
 
     latest_jobs = sprouts_response.jobs_updated_since
@@ -270,10 +206,9 @@ def process_sprouts_response(data: dict):
         if isinstance(job.location, list):
             active_locations = [loc.name for loc in job.location if (loc.status or "").lower() == "true"]
             payload["location"] = active_locations
-            possible_locations_set = get_possible_locations_from_api(active_locations)
+            #possible_locations_set = get_possible_locations_from_api(active_locations)
             #payload["possible_locations"] = list(possible_locations_set)
-            lat_longitudes = fetch_lat_lon(possible_locations_set)
-            #payload["lat_longitudes"] = lat_longitudes
+            lat_longitudes = await fetch_lat_lon(active_locations)
             geo_points_payload = []
             for loc, coords in lat_longitudes.items():
                 geo_points_payload.append({
@@ -320,6 +255,7 @@ def process_sprouts_response(data: dict):
 
 
 if __name__ == "__main__":
+    import asyncio
     sprouts_data = {
         "jobs_updated_since": [
             {
@@ -551,6 +487,5 @@ if __name__ == "__main__":
             }
         ]
     }
-
-    next_req = process_sprouts_response(sprouts_data)
+    next_req = asyncio.run(process_sprouts_response(sprouts_data))
     print("Next Request:", next_req)
